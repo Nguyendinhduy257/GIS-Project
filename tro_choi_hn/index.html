@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trò chơi chọn vị trí trạm sạc xe điện: các quận Hà Nội</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#10231a;--mut:#5b6b62;--acc:#0a7d5a;--bg:rgba(255,255,255,.96)}
+html,body,#map{height:100%;margin:0}
+body{font-family:'Be Vietnam Pro',system-ui,sans-serif;color:var(--ink)}
+.panel{position:absolute;z-index:1000;background:var(--bg);border-radius:12px;box-shadow:0 4px 18px rgba(0,0,0,.22);padding:14px 16px}
+#hud{top:12px;left:12px;width:min(340px,calc(100vw - 48px))}
+#hud h1{font-size:17px;font-weight:800;margin:0 0 4px}
+#where{margin:0 0 6px;font-size:12.5px;font-weight:600;color:var(--acc)}
+#hint{margin:0 0 10px;font-size:13.5px;line-height:1.5;color:var(--mut);min-height:40px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row + .row{margin-top:8px}
+button{font:600 13px 'Be Vietnam Pro',sans-serif;border:0;border-radius:8px;padding:9px 12px;cursor:pointer;background:var(--acc);color:#fff}
+button.alt{background:#10231a}
+button:disabled{opacity:.35;cursor:not-allowed}
+#info{left:12px;bottom:12px;width:min(340px,calc(100vw - 48px));display:none;font-size:13px;max-height:46vh;overflow:auto}
+#info .big{font-size:34px;font-weight:800;line-height:1}
+.chip{display:inline-block;padding:2px 9px;border-radius:99px;color:#fff;font-weight:600;font-size:12px;margin-left:8px;vertical-align:middle}
+.crit{margin-top:9px}.crit b{font-weight:600}.crit span{float:right;color:var(--mut)}
+.bar{height:6px;border-radius:3px;background:#e4ebe7;margin-top:3px}.bar i{display:block;height:100%;border-radius:3px;background:var(--acc)}
+#legend{right:12px;bottom:24px;font-size:12.5px}
+#legend h3{margin:0 0 6px;font-size:13px}
+#legend div{display:flex;align-items:center;gap:8px;margin:3px 0}
+#legend i{width:18px;height:14px;border-radius:3px;flex:none}#legend em{margin-left:auto;font-style:normal;color:var(--mut);padding-left:12px}
+.pin{width:24px;height:24px;border-radius:50%;color:#fff;font:800 12px/20px 'Be Vietnam Pro';text-align:center;border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.4)}
+.pin.p{background:#7c3aed}.pin.m{background:#c2410c}
+.st{width:9px;height:9px;border-radius:50%;background:#0b3d91;border:2px solid #fff}
+.pin.t{background:#10231a}
+.leaflet-tile-pane{filter:grayscale(.92) contrast(.92) brightness(1.06)}
+#legend [data-l],#legend [data-q]{cursor:pointer;padding:1px 4px;margin:1px -4px;border-radius:5px}
+#legend .on{background:#e4ebe7;font-weight:600}
+#legend [data-q]:hover{background:#e4ebe7}
+table{width:100%;border-collapse:collapse;margin:8px 0}td{padding:3px 0}td:last-child{text-align:right;font-weight:600}
+#info tr[data-s]{cursor:pointer}#info tr[data-s]:hover{background:#e4ebe7}
+#info td:nth-child(2){text-align:left;font-weight:400;padding-left:8px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud" class="panel">
+  <h1>⚡ Chọn vị trí trạm sạc xe điện</h1>
+  <p id="where">Toàn Hà Nội</p>
+  <p id="hint"></p>
+  <div class="row">
+    <button id="bAll" disabled>Tính điểm toàn bộ ô</button>
+    <button id="bGame" class="alt" disabled>Thử thách: chọn 3 vị trí</button>
+    <button id="bTop" class="alt" disabled>Hiện top 10</button>
+  </div>
+  <div class="row">
+    <button id="bBack" class="alt" style="display:none">← Toàn Hà Nội</button>
+    <button id="bCity" class="alt">Đề xuất toàn Hà Nội</button>
+  </div>
+</div>
+<div id="info" class="panel"></div>
+<div id="legend" class="panel"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="data/hn.js"></script>
+<script>
+/* ===== Dữ liệu và công thức chấm điểm (giống notebook: phần 5 và 7) ===== */
+const $ = id => document.getElementById(id);
+if (!window.HN_DATA){
+  $('hint').textContent = 'Chưa thấy data/hn.js: hãy chạy phần 9 của notebook tram_sac_xe_dien_2.ipynb rồi nhấn Ctrl + F5.';
+  throw new Error('thiếu data/hn.js');
+}
+const H = window.HN_DATA, W = H.weights;
+const DB = Object.fromEntries(H.districts.map(d => [d.slug, d]));
+let C = [], LH = [];                       // ô và mốc chuẩn hóa của quận đang mở (nạp theo từng quận)
+const KEYS = ['pop','apt','poi','road','charger'];
+const NAME = ['Dân số trong ô','Chung cư (500 m)','Điểm đến (500 m)','Cách đường trục chính','Cách trạm sạc gần nhất'];
+const UNIT = ['người','','','m','m'];
+// 6 mức điểm (thang 0-100): chỉnh CUT nếu muốn đổi ngưỡng
+const LV = [['Thấp','#b2182b'],['Trung bình thấp','#ef8a62'],['Trung bình','#f6d860'],
+            ['Trung bình tốt','#a6d96a'],['Tốt','#4dac26'],['Rất tốt','#17612c']];
+const CUT = [20, 35, 50, 65, 80];
+const tf = (j, x) => (H.log && j < 3) ? Math.log1p(x) : x;   // giống notebook: log1p cho dân số, chung cư, điểm đến
+const clamp = x => Math.max(0, Math.min(1, x));
+function nrm(j, x){
+  if (j === 4) return Math.min(x, 2000) / 2000;       // càng xa trạm khác càng tốt, trần 2 km
+  const [lo,hi] = LH[j], n = hi === lo ? 0 : clamp((tf(j,x)-lo)/(hi-lo));
+  return j === 3 ? 1 - n : n;                          // càng gần đường trục chính càng tốt
+}
+const dist = (a,b) => Math.hypot((a[1]-b[1])*111320*Math.cos(a[0]*Math.PI/180), (a[0]-b[0])*110540);
+function parts(c, placed){
+  let d = c.v[4]; for (const p of placed) d = Math.min(d, dist(c.c, p));
+  return [...c.v.slice(0,4), d].map((x,j) => { const n = nrm(j,x); return {x, n, pt: 100*W[KEYS[j]]*n}; });
+}
+const score = (c, placed) => c.x ? null : parts(c, placed).reduce((s,p) => s+p.pt, 0);
+const level = s => { let i=0; while (i<5 && s>=CUT[i]) i++; return i; };
+
+/* ===== Bản đồ ===== */
+const map = L.map('map', {zoomControl:false}).setView([21.0,105.8], 11);
+L.control.zoom({position:'topright'}).addTo(map);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+  {maxZoom:19, attribution:'Tiles &copy; Esri, HERE, Garmin, OpenStreetMap contributors'}).addTo(map);
+map.createPane('borderPane');                          // viền quận đang mở nằm trên các ô, không chặn chuột
+map.getPane('borderPane').style.zIndex = 450;
+map.getPane('borderPane').style.pointerEvents = 'none';
+
+let stage = 0, placed = [], game = null, sel = null, focus = null, cur = null, token = 0, cityOn = false;
+const polys = [], cellsL = L.layerGroup().addTo(map), pins = L.layerGroup().addTo(map), topL = L.layerGroup().addTo(map),
+      cityL = L.layerGroup().addTo(map), borderL = L.layerGroup().addTo(map);
+const OVERVIEW_HINT = 'Bước 1: bấm vào một quận trên bản đồ để viền quận sáng lên và hiện ma trận ô 250 m, hoặc bấm "Đề xuất toàn Hà Nội".';
+const PAD = innerWidth > 900 ? 380 : 20;
+
+/* Các quận: tô màu theo điểm trung bình khi chưa chọn, mờ đi khi đã mở một quận */
+const distL = {};
+function ovStyle(d){
+  if (cur === null) return {color:'#0a7d5a', weight:2.5, dashArray:null, fillColor:LV[level(d.st.mean)][1], fillOpacity:.38};
+  if (cur === d.slug) return {color:'#0a7d5a', weight:1, dashArray:null, fillOpacity:0};
+  return {color:'#0a7d5a', weight:1.5, dashArray:'4 4', fillColor:'#0a7d5a', fillOpacity:.07};
+}
+const distTip = d => `<b>${d.ten}</b><br>${d.st.n} ô · TB ${d.st.mean.toFixed(1)} điểm · ${d.st.stations} trạm hiện có` +
+  (cur === d.slug ? '' : '<br>Bấm để mở');
+H.districts.forEach(d => {
+  const l = L.geoJSON(d.geom, {style: ovStyle(d)}).addTo(map);
+  l.on('click', () => { if (cur !== d.slug) openDistrict(d.slug); });
+  l.bindTooltip(() => distTip(d), {sticky:true});
+  distL[d.slug] = l;
+});
+const allBounds = () => L.featureGroup(Object.values(distL)).getBounds();
+map.fitBounds(allBounds());
+
+function restyle(){
+  H.districts.forEach(d => distL[d.slug].setStyle(ovStyle(d)));
+  borderL.clearLayers();
+  if (cur){                                            // viền sáng: lớp trắng dày bên dưới, lớp xanh bên trên
+    const g = DB[cur].geom;
+    L.geoJSON(g, {pane:'borderPane', interactive:false, style:{color:'#fff', weight:8, opacity:.95, fill:false}}).addTo(borderL);
+    L.geoJSON(g, {pane:'borderPane', interactive:false, style:{color:'#0a7d5a', weight:4, opacity:1, fill:false}}).addTo(borderL);
+  }
+}
+
+(H.stations||[]).forEach(s => L.marker(s, {icon:L.divIcon({className:'st', iconSize:[9,9]}), interactive:false, keyboard:false})
+  .bindTooltip('Trạm sạc hiện có').addTo(map));
+
+function hint(t){ $('hint').textContent = t; }
+const setBtn = on => { $('bAll').disabled = $('bGame').disabled = $('bTop').disabled = !on; };
+hint(OVERVIEW_HINT);
+
+/* ===== Mở một quận: nạp dữ liệu, viền sáng, dựng ma trận ô ===== */
+function loadCells(slug){
+  window.HN_CELLS = window.HN_CELLS || {};
+  if (window.HN_CELLS[slug]) return Promise.resolve(window.HN_CELLS[slug]);
+  return new Promise((res, rej) => {                   // thẻ script thay cho fetch để mở thẳng file:// vẫn chạy
+    const s = document.createElement('script');
+    s.src = 'data/' + slug + '.js';
+    s.onload = () => window.HN_CELLS[slug] ? res(window.HN_CELLS[slug]) : rej(new Error('rỗng'));
+    s.onerror = () => rej(new Error('thiếu file'));
+    document.head.appendChild(s);
+  });
+}
+function resetCells(){
+  cellsL.clearLayers(); polys.length = 0; pins.clearLayers(); topL.clearLayers(); cityL.clearLayers();
+  sel = null; focus = null; game = null; placed = []; stage = 0; cityOn = false;
+  $('info').style.display = 'none';
+  $('bAll').textContent = 'Tính điểm toàn bộ ô'; $('bTop').textContent = 'Hiện top 10'; $('bCity').textContent = 'Đề xuất toàn Hà Nội';
+  setBtn(false);
+}
+function openDistrict(slug, k){
+  const my = ++token, d = DB[slug];
+  resetCells(); cur = slug; restyle(); legend();
+  $('where').textContent = 'Quận ' + d.ten; $('bBack').style.display = '';
+  map.fitBounds(distL[slug].getBounds(), {paddingTopLeft:[PAD,20], paddingBottomRight:[20,20]});
+  hint('Đang tải dữ liệu quận ' + d.ten + '...');
+  loadCells(slug).then(data => {
+    if (my !== token) return;                          // đã chuyển sang quận khác trong lúc tải
+    C = data.cells; LH = data.lh; build(my, k);
+  }).catch(() => {
+    if (my !== token) return;
+    hint('Không nạp được data/' + slug + '.js. Hãy chạy phần 9 của notebook tram_sac_xe_dien_2.ipynb rồi nhấn Ctrl + F5.');
+  });
+}
+function goOverview(){
+  token++; resetCells(); cur = null; C = [];
+  $('where').textContent = 'Toàn Hà Nội'; $('bBack').style.display = 'none';
+  restyle(); legend(); map.fitBounds(allBounds()); hint(OVERVIEW_HINT);
+}
+function build(my, k){
+  stage = 1; hint('Đang dựng ma trận ô...');
+  let n0 = 0;
+  (function step(){
+    if (my !== token) return;
+    for (let n=0; n<90 && n0<C.length; n++, n0++) mk(n0);
+    if (n0 < C.length) return requestAnimationFrame(step);
+    setBtn(true);
+    hint('Bước 2: bấm một ô để xem điểm tiềm năng, hoặc bấm "Tính điểm toàn bộ ô" để tô màu cả quận.');
+    legend();
+    if (k != null && C[k]){ select(C[k], k); map.setView(C[k].c, 16); }
+  })();
+}
+
+const tip = c => c.x ? 'Ô loại trừ (mặt nước)' : (game && !game.done) ? 'Bấm để đặt trạm tại ô này'
+  : stage < 2 ? 'Bấm để xem điểm' : (s => s.toFixed(0) + ' điểm · ' + LV[level(s)][0])(score(c, placed));
+function mk(i){
+  const c = C[i], ll = []; for (let j=0; j<8; j+=2) ll.push([c.p[j], c.p[j+1]]);
+  const p = L.polygon(ll, {weight:.5, color:c.x?'#999':'#456', fillColor:'#9ab', fillOpacity:c.x?.35:.06}).addTo(cellsL);
+  p.on('click', e => { L.DomEvent.stopPropagation(e); cellClick(c, i); });
+  p.bindTooltip(() => tip(c), {sticky:true});
+  polys[i] = p;
+}
+function paint(list){
+  const cnt = [0,0,0,0,0,0]; if (stage !== 2) focus = null;
+  C.forEach((c,i) => {
+    const p = polys[i], s = score(c, list);
+    if (stage === 2 && s !== null){ const l = level(s); cnt[l]++; p.setStyle({fillColor:LV[l][1], fillOpacity:focus===null||focus===l ? .6 : .04, color:'#fff', weight:.3, opacity:.5}); }
+    else p.setStyle({fillColor:c.x?'#999':'#9ab', fillOpacity:c.x?.35:.06, color:c.x?'#999':'#456', weight:.5, opacity:1});
+  });
+  legend(stage === 2 ? cnt : null);
+}
+function legend(cnt){
+  const stn = '<div><i style="background:#0b3d91;border-radius:50%;width:10px;height:10px;margin:0 4px"></i>Trạm sạc hiện có</div>';
+  if (cur === null){                                   // toàn Hà Nội: xếp hạng các quận theo điểm trung bình
+    $('legend').innerHTML = '<h3>Điểm trung bình theo quận</h3>' +
+      [...H.districts].sort((a,b) => b.st.mean - a.st.mean).map(d =>
+        `<div data-q="${d.slug}"><i style="background:${LV[level(d.st.mean)][1]}"></i>${d.ten}<em>${d.st.mean.toFixed(1)}</em></div>`).join('') +
+      stn + '<div style="color:var(--mut);font-size:11.5px">Bấm một quận để xem ô 250 m</div>' +
+      (H.scope === 'district' ? '<div style="color:var(--mut);font-size:11.5px">Mỗi quận chuẩn hóa riêng nên không so sánh điểm giữa các quận</div>' : '');
+    return;
+  }
+  $('legend').innerHTML = '<h3>Tiềm năng đặt trạm</h3>' +
+    LV.map((l,i) => `<div data-l="${i}" class="${focus===i?'on':''}"><i style="background:${l[1]}"></i>${l[0]}<em>${cnt ? cnt[i] : ''}</em></div>`).join('') +
+    '<div><i style="background:#999"></i>Loại trừ (mặt nước)</div>' + stn +
+    (cnt ? '<div style="color:var(--mut);font-size:11.5px">Bấm một mức để chỉ xem mức đó</div>' : '');
+}
+legend();
+
+$('legend').onclick = e => {
+  const q = e.target.closest('[data-q]'); if (q) return openDistrict(q.dataset.q);
+  const r = e.target.closest('[data-l]'); if (!r || stage !== 2) return;
+  const l = +r.dataset.l; focus = focus === l ? null : l; paint(placed);
+};
+
+/* ===== Xem điểm một ô ===== */
+function cellClick(c, i){ if (game && !game.done) return gpick(c, i); select(c, i); }
+function select(c, i){
+  if (sel !== null && polys[sel]) polys[sel].setStyle({weight: stage===2 ? .3 : .5, color: stage===2 ? '#fff' : '#456', opacity: stage===2 ? .5 : 1});
+  sel = i; polys[i].setStyle({weight:3, color:'#000', opacity:1}).bringToFront();
+  const box = $('info'); box.style.display = 'block';
+  if (c.x){ box.innerHTML = '<b>Ô loại trừ</b><br>Ô này bị mặt nước phủ trên 50%, không đặt trạm được.'; return; }
+  const ps = parts(c, placed), s = ps.reduce((a,p) => a+p.pt, 0), l = level(s);
+  const all = C.filter(k => !k.x).map(k => score(k, placed)), r = 1 + all.filter(v => v > s).length;
+  box.innerHTML = `<div class="big">${s.toFixed(1)}<small style="font-size:14px;color:var(--mut)"> / 100</small>
+      <span class="chip" style="background:${LV[l][1]};${l===2?'color:#10231a':''}">${LV[l][0]}</span></div>
+    <div style="color:var(--mut);margin-top:4px">Hạng ${r} / ${all.length} ô của quận ${DB[cur].ten} (top ${(100*r/all.length).toFixed(0)}%)</div>` +
+    ps.map((p,j) => `<div class="crit"><b>${NAME[j]}</b><span>${Math.round(p.x)} ${UNIT[j]} · +${p.pt.toFixed(1)} điểm</span>
+      <div class="bar"><i style="width:${(p.n*100).toFixed(0)}%"></i></div></div>`).join('');
+}
+
+/* ===== Tính toàn bộ ===== */
+$('bAll').onclick = () => {
+  if (game && !game.done) return hint('Đang trong thử thách, hoàn thành 3 lượt chọn trước đã.');
+  stage = stage === 2 ? 1 : 2; paint(placed);
+  $('bAll').textContent = stage === 2 ? 'Ẩn điểm các ô' : 'Tính điểm toàn bộ ô';
+  hint(stage === 2 ? 'Mỗi màu là một mức tiềm năng. Số bên phải chú giải là số ô ở mức đó. Bấm một ô để xem chi tiết.'
+                   : 'Đã ẩn điểm. Bấm một ô để xem điểm, hoặc tính lại toàn bộ.');
+};
+
+$('bTop').onclick = () => {
+  if (game && !game.done) return hint('Đang trong thử thách, hoàn thành 3 lượt chọn trước đã.');
+  if (topL.getLayers().length){ topL.clearLayers(); $('bTop').textContent = 'Hiện top 10'; return; }
+  C.map((c,i) => ({c, i, s:score(c, placed)})).filter(o => o.s !== null).sort((a,b) => b.s-a.s).slice(0,10).forEach((o,k) =>
+    L.marker(o.c.c, {icon:L.divIcon({className:'', html:`<div class="pin t">${k+1}</div>`, iconSize:[24,24], iconAnchor:[12,12]})})
+      .on('click', () => cellClick(o.c, o.i)).addTo(topL));
+  $('bTop').textContent = 'Ẩn top 10';
+  hint('Mười ô điểm cao nhất của quận, đánh số từ 1. Bấm một ghim để xem chi tiết.');
+};
+
+/* ===== Thử thách: chọn 3 vị trí (trong quận đang mở) ===== */
+$('bGame').onclick = () => {
+  stage = 1; placed = []; pins.clearLayers(); topL.clearLayers(); $('bTop').textContent = 'Hiện top 10'; paint([]); $('bAll').textContent = 'Tính điểm toàn bộ ô';
+  game = {picks:[], done:false}; $('info').style.display = 'none';
+  hint('Thử thách: hãy chọn vị trí tốt nhất thứ 1 trong 3. Mỗi trạm bạn đặt sẽ cạnh tranh với các ô xung quanh.');
+};
+const pin = (c, n, cls) => L.marker(c.c, {icon:L.divIcon({className:'', html:`<div class="pin ${cls}">${n}</div>`, iconSize:[24,24], iconAnchor:[12,12]})}).addTo(pins);
+function gpick(c){
+  if (c.x) return hint('Ô này bị loại (mặt nước), chọn ô khác.');
+  if (game.picks.some(p => p.c === c)) return hint('Bạn đã chọn ô này rồi.');
+  game.picks.push({c, s:score(c, placed)}); placed.push(c.c); pin(c, game.picks.length, 'p');
+  if (game.picks.length < 3) return hint(`Đã đặt trạm ${game.picks.length}/3. Chọn vị trí thứ ${game.picks.length+1}.`);
+  finish();
+}
+function finish(){
+  game.done = true; const sim = [], opt = [];
+  for (let k=0; k<3; k++){
+    let b = null, bs = -1;
+    for (const c of C){ if (c.x) continue; const s = score(c, sim); if (s > bs){ bs = s; b = c; } }
+    opt.push({c:b, s:bs}); sim.push(b.c); pin(b, k+1, 'm');
+  }
+  const me = game.picks.reduce((a,p) => a+p.s, 0), best = opt.reduce((a,p) => a+p.s, 0), ratio = 100*me/best;
+  placed = []; stage = 2; paint([]); $('bAll').textContent = 'Ẩn điểm các ô';
+  const v = ratio>=95 ? 'Xuất sắc!' : ratio>=85 ? 'Rất tốt!' : ratio>=70 ? 'Khá tốt' : 'Cần xem lại các tiêu chí';
+  hint('Kết thúc. Ghim tím là lựa chọn của bạn, ghim cam là gợi ý của máy. Bản đồ đã tô màu toàn bộ ô.');
+  const box = $('info'); box.style.display = 'block';
+  box.innerHTML = `<b style="font-size:16px">${v} Bạn đạt ${ratio.toFixed(0)}% so với máy</b>
+    <table><tr><td></td><td style="color:var(--mut)">Bạn</td><td style="color:var(--mut)">Máy</td></tr>` +
+    [0,1,2].map(k => `<tr><td>Lượt ${k+1}</td><td>${game.picks[k].s.toFixed(1)}</td><td>${opt[k].s.toFixed(1)}</td></tr>`).join('') +
+    `<tr><td><b>Tổng</b></td><td>${me.toFixed(1)}</td><td>${best.toFixed(1)}</td></tr></table>
+    <div style="color:var(--mut);margin-bottom:8px">Máy chọn lần lượt ô điểm cao nhất, có tính cạnh tranh với trạm đã đặt.</div>
+    <button onclick="document.getElementById('bGame').click()">Chơi lại</button>`;
+}
+
+/* ===== Điều hướng giữa các quận và đề xuất toàn Hà Nội ===== */
+$('bBack').onclick = () => {
+  if (game && !game.done) return hint('Đang trong thử thách, hoàn thành 3 lượt chọn trước đã.');
+  goOverview();
+};
+$('bCity').onclick = () => {
+  if (game && !game.done) return hint('Đang trong thử thách, hoàn thành 3 lượt chọn trước đã.');
+  if (cur !== null) goOverview();
+  cityOn = !cityOn; cityL.clearLayers();
+  if (!cityOn){ $('bCity').textContent = 'Đề xuất toàn Hà Nội'; $('info').style.display = 'none'; hint(OVERVIEW_HINT); return; }
+  H.top_city.forEach((o, n) =>
+    L.marker([o.lat, o.lon], {icon:L.divIcon({className:'', html:`<div class="pin t">${n+1}</div>`, iconSize:[24,24], iconAnchor:[12,12]})})
+      .bindTooltip(`${o.ten} · ${o.score.toFixed(1)} điểm`).on('click', () => openDistrict(o.slug, o.k)).addTo(cityL));
+  $('bCity').textContent = 'Ẩn đề xuất';
+  const box = $('info'); box.style.display = 'block';
+  box.innerHTML = '<b style="font-size:15px">10 vị trí tốt nhất toàn Hà Nội</b>' +
+    '<table>' + H.top_city.map((o,n) => `<tr data-s="${o.slug}" data-k="${o.k}"><td>${n+1}</td><td>${o.ten}</td><td>${o.score.toFixed(1)}</td></tr>`).join('') + '</table>' +
+    '<div style="color:var(--mut)">' + (H.scope === 'district' ? 'Mỗi quận chuẩn hóa riêng nên thứ hạng này chỉ mang tính tham khảo. ' : '') +
+    'Bấm một dòng hoặc một ghim để mở quận và xem chi tiết ô đó.</div>';
+  hint('Mười ô điểm cao nhất trong mọi quận đã tính. Bấm một ghim để mở quận chứa ô đó.');
+  map.fitBounds(allBounds(), {paddingTopLeft:[PAD,20], paddingBottomRight:[20,20]});
+};
+$('info').onclick = e => { const r = e.target.closest('tr[data-s]'); if (r) openDistrict(r.dataset.s, +r.dataset.k); };
+</script>
+</body>
+</html>

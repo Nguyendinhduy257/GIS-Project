@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.virtual_documents/
+
+# Cache Overpass (tự sinh lại khi chạy notebook)
+cache/
+
+# Tệp tạm
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
